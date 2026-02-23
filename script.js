@@ -2,6 +2,7 @@
 // - Mentions the time to reduce to 180°F only within the "hold" bullet.
 // - Defaults Starting State to Frozen on load.
 // - Handles day boundaries and "too early to start now" gating.
+// NOTE: No standalone or all-caps "DROP" text anywhere.
 
 document.addEventListener("DOMContentLoaded", () => {
   const stateEl = document.getElementById("state");
