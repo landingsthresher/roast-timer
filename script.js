@@ -1,31 +1,41 @@
-// script.js
+// Roast Timer – dual-output version
+// 1) Ideal Plan: use a preferred low-temp (default 240°F) + 60 min @ 180°F; report ideal start time
+// 2) Start-Now Plan: solve for a main-phase oven temp that hits the target if you begin right now
+
 document.getElementById("calcBtn").addEventListener("click", () => {
   const weight = parseFloat(document.getElementById("weight").value);
   const state  = document.getElementById("state").value;
-  const targetTime = document.getElementById("targetTime").value; // "HH:MM" (local)
+  const targetTimeStr = document.getElementById("targetTime").value; // "HH:MM" (local)
 
-  if (!weight || !targetTime) {
-    showResult("Please fill out weight and target time.");
+  if (!weight || !targetTimeStr) {
+    showResult("Please enter weight and target time.");
     return;
   }
 
-  // --- Model parameters (tunable) ---
+  // -------------------- Model parameters (tunable) --------------------
   const REF_TEMP_F = 325;
-  const BASELINE_MIN_PER_LB = 70;   // baseline @ 325°F, thawed
-  const ALPHA = 1.3;                // super-linear time growth as oven temp drops
-  const HOLD_TEMP_F = 180;          // end-of-cook gentle hold
-  const HOLD_MIN = 60;              // 60-minute hold
-  const LO_TEMP_BOUND = 200;        // search lower bound
-  const HI_TEMP_BOUND = 500;        // search upper bound
+  const BASELINE_MIN_PER_LB = 70; // baseline at 325°F, thawed
+  const ALPHA = 1.3;              // time ∝ (REF/ovenTemp)^ALPHA (captures non-linear slowdowns at low temp)
+  const HOLD_TEMP_F = 180;        // end-of-cook gentle hold
+  const HOLD_MIN = 60;            // 60-minute hold
 
+  // Your preferred main temp for "Ideal Plan":
+  // This mirrors your real-world success at low temp with a finishing hold.
+  const IDEAL_MAIN_TEMP_F = 240;
+
+  // Bounds for the "start now" solver
+  const MIN_OVEN_F = 200;
+  const MAX_OVEN_F = 500;
+
+  // Frozen/partial multipliers (rule-of-thumb for planning; always verify with a thermometer)
   const STATE_MULT = { thawed: 1.00, partial: 1.25, frozen: 1.50 };
 
-  // Collagen/low-temp time bonus at ≤ 250°F
+  // Collagen/low-temp bonus: add modest time at ≤ 250°F
   const lowTempBonus = (tF) => (tF <= 250 ? 1.15 : 1.0);
 
+  // -------------------- Timing functions --------------------
   function minutesPhase1AtTemp(tF, wt, st) {
     const stateMult = STATE_MULT[st] ?? 1.0;
-    // phase-1 (main cook) only
     return (
       wt *
       BASELINE_MIN_PER_LB *
@@ -39,88 +49,121 @@ document.getElementById("calcBtn").addEventListener("click", () => {
     return minutesPhase1AtTemp(tF, wt, st) + HOLD_MIN;
   }
 
-  // Parse target into today's date at given time
+  // Resolve target time: if the chosen time today has already passed, assume *tomorrow* at that time.
+  function resolveTargetDate(timeStr) {
+    const [hh, mm] = timeStr.split(":").map(Number);
+    const now = new Date();
+    const t = new Date();
+    t.setHours(hh, mm, 0, 0);
+    if (t <= now) {
+      // assume tomorrow (planning for the next occurrence of that time)
+      t.setDate(t.getDate() + 1);
+    }
+    return t;
+  }
+
+  // Binary search for the lowest oven temp that allows total time ≤ available
+  function solveOvenTempForWindow(availableMin, wt, st) {
+    let lo = MIN_OVEN_F, hi = MAX_OVEN_F, best = null;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      const tot = totalMinutesAtTemp(mid, wt, st);
+      if (tot <= availableMin) {
+        best = mid; // feasible; try to go lower (gentler)
+        hi = mid;
+      } else {
+        lo = mid;
+      }
+    }
+    return best;
+  }
+
+  // -------------------- Compute both plans --------------------
   const now = new Date();
-  const [tH, tM] = targetTime.split(":").map(Number);
-  const target = new Date();
-  target.setHours(tH, tM, 0, 0);
+  const target = resolveTargetDate(targetTimeStr);
 
-  if (target <= now) {
-    showResult("Target time must be in the future.");
-    return;
-  }
+  // --- 1) Ideal Plan (preferred main temp + hold), regardless of "now" ---
+  const idealPhase1Min = Math.round(minutesPhase1AtTemp(IDEAL_MAIN_TEMP_F, weight, state));
+  const idealTotalMin = idealPhase1Min + HOLD_MIN;
+  const idealStart = new Date(target.getTime() - idealTotalMin * 60000);
 
-  const availableMin = Math.round((target - now) / 60000);
+  // --- 2) Start-Now Plan (solve for oven temp so starting now still meets the target) ---
+  const availableMin = Math.max(0, Math.round((target - now) / 60000));
+  let startNowHtml = "";
+
   if (availableMin <= HOLD_MIN + 5) {
-    showResult(
-      `Not enough time: you need at least ${HOLD_MIN + 5} minutes from now to include the 60‑minute hold.`
-    );
-    return;
-  }
+    // Not enough time remaining to include the 60-min hold
+    startNowHtml += `
+      <p><strong>Start‑Now Plan:</strong> Not enough time left to include the 60‑minute hold.</p>
+      <p>You need at least <strong>${HOLD_MIN + 5} minutes</strong> from now. Consider a later target time.</p>
+    `;
+  } else {
+    const needPhase1 = availableMin - HOLD_MIN;
+    const minTimeAtMax = Math.round(minutesPhase1AtTemp(MAX_OVEN_F, weight, state));
 
-  // Find the lowest oven temp (200..500°F) that fits available time
-  const needPhase1 = availableMin - HOLD_MIN;
-
-  // If even at 500°F it's still too long, tell the user
-  const minTimeAtMaxHeat = minutesPhase1AtTemp(HI_TEMP_BOUND, weight, state);
-  if (minTimeAtMaxHeat > needPhase1) {
-    const soonestFinishMin = Math.round(minTimeAtMaxHeat + HOLD_MIN);
-    const soonestDate = new Date(now.getTime() + soonestFinishMin * 60000);
-    showResult(`
-      <p><strong>Even at 500°F you won't make the target.</strong></p>
-      <p>Soonest finish (with 60‑min hold): <strong>${format12Hour(soonestDate)}</strong> (${formatDuration(soonestFinishMin)} from now).</p>
-      <p>Options: start earlier, shorten the hold, or choose a later target time.</p>
-    `);
-    return;
-  }
-
-  // Binary search for temp where total time <= availableMin
-  let lo = LO_TEMP_BOUND, hi = HI_TEMP_BOUND, best = HI_TEMP_BOUND;
-  for (let i = 0; i < 40; i++) {
-    const mid = (lo + hi) / 2;
-    const tot = totalMinutesAtTemp(mid, weight, state);
-    if (tot <= availableMin) {
-      best = mid;      // mid works; try lower temp (gentler cook)
-      hi = mid;
+    if (minTimeAtMax > needPhase1) {
+      // Impossible even at 500°F — tell user the soonest feasible finish
+      const soonestFinishMin = minTimeAtMax + HOLD_MIN;
+      const soonestFinish = new Date(now.getTime() + soonestFinishMin * 60000);
+      startNowHtml += `
+        <p><strong>Start‑Now Plan:</strong> Even at <strong>${MAX_OVEN_F}°F</strong>, the target is not achievable.</p>
+        <p>Soonest finish (including ${HOLD_MIN}-min hold): <strong>${format12Hour(soonestFinish)}</strong> (${formatDuration(soonestFinishMin)} from now).</p>
+        <p>Options: start earlier, shorten the hold, or pick a later target time.</p>
+      `;
     } else {
-      lo = mid;
+      // Solve for the gentlest temp that still fits
+      const bestTemp = Math.round(solveOvenTempForWindow(availableMin, weight, state));
+      const startNowTotalMin = Math.round(totalMinutesAtTemp(bestTemp, weight, state));
+      const startNowPhase1Min = startNowTotalMin - HOLD_MIN;
+      const dropToHoldAt = new Date(target.getTime() - HOLD_MIN * 60000);
+
+      startNowHtml += `
+        <p><strong>Start‑Now Plan</strong> (begin immediately)</p>
+        <ul>
+          <li>Main oven temp: <strong>${bestTemp}°F</strong></li>
+          <li>Main phase: <strong>${formatDuration(startNowPhase1Min)}</strong> (from now)</li>
+          <li>At <strong>${format12Hour(dropToHoldAt)}</strong>, reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
+          <li>Ready at <strong>${format12Hour(target)}</strong></li>
+        </ul>
+      `;
     }
   }
 
-  const recTemp = Math.round(best);
-  const totalMin = Math.round(totalMinutesAtTemp(recTemp, weight, state));
-  const phase1Min = totalMin - HOLD_MIN;
+  // -------------------- Build Ideal Plan HTML --------------------
+  const idealStatus =
+    idealStart < now
+      ? ` (this start time is <strong>${formatDelta(now - idealStart)} late</strong> for today)`
+      : "";
 
-  const dropToHoldAt = new Date(target.getTime() - HOLD_MIN * 60000);
-
-  // Friendly plan
-  let plan = `<p><strong>Recommended oven temperature:</strong> <span style="font-size:1.1em">${recTemp}°F</span></p>`;
-  plan += `<p><strong>Total time:</strong> ${formatDuration(totalMin)} (main phase ${formatDuration(phase1Min)} + ${HOLD_MIN}‑min hold)</p>`;
-  plan += `<p><strong>Schedule:</strong></p><ul>`;
-  plan += `<li>Start <strong>now</strong> at <strong>${recTemp}°F</strong>.</li>`;
-  plan += `<li>Cook for <strong>${formatDuration(phase1Min)}</strong>.</li>`;
-  plan += `<li>At <strong>${format12Hour(dropToHoldAt)}</strong>, reduce to <strong>${HOLD_TEMP_F}°F</strong> and hold for <strong>${HOLD_MIN} min</strong>.</li>`;
-  plan += `<li>Ready at <strong>${format12Hour(target)}</strong>.</li>`;
-  plan += `</ul>`;
-
-  // Safety + probe reminder (carryover is smaller with low-temp)
-  const safety = `
-    <p><em>Tip:</em> Use a thermometer to confirm safe/internal doneness
-    (e.g., whole beef/pork roasts <strong>145°F + 3‑min rest</strong>; poultry <strong>165°F</strong>).
-    Carryover rise is smaller with gentle roasting, so verify temps before the hold ends.</p>
+  const idealHtml = `
+    <p><strong>Ideal Plan</strong> (preferred main phase <strong>${IDEAL_MAIN_TEMP_F}°F</strong> + ${HOLD_MIN}‑min hold)</p>
+    <ul>
+      <li>Ideal start: <strong>${format12Hour(idealStart)}</strong>${idealStatus}</li>
+      <li>Main phase: <strong>${formatDuration(idealPhase1Min)}</strong> at <strong>${IDEAL_MAIN_TEMP_F}°F</strong></li>
+      <li>Then reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
+      <li>Ready at <strong>${format12Hour(target)}</strong></li>
+    </ul>
   `;
 
-  showResult(plan + safety);
+  // -------------------- Safety reminder --------------------
+  const safety = `
+    <p><em>Reminder:</em> Always verify doneness with a thermometer.
+    Whole beef/pork roasts are typically served at ~145°F + short rest; poultry at ~165°F.
+    Carryover rise is smaller with gentle roasting, so confirm temps before the hold ends.</p>
+  `;
+
+  showResult(idealHtml + startNowHtml + safety);
 });
 
-// ---- Utilities ----
+// -------------------- Utilities --------------------
 function format12Hour(date) {
-  let hours = date.getHours();
-  const minutes = date.getMinutes().toString().padStart(2, "0");
-  const ampm = hours >= 12 ? "PM" : "AM";
-  hours = hours % 12 || 12;
-  return `${hours}:${minutes} ${ampm}`;
+  let h = date.getHours();
+  const m = date.getMinutes().toString().padStart(2, "0");
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${h}:${m} ${ampm}`;
 }
+
 function formatDuration(mins) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
@@ -128,9 +171,19 @@ function formatDuration(mins) {
   if (m === 0) return `${h} hour${h !== 1 ? "s" : ""}`;
   return `${h} hour${h !== 1 ? "s" : ""} ${m} min`;
 }
+
+// e.g., "2h 15m" for a positive millisecond difference
+function formatDelta(ms) {
+  const mins = Math.round(ms / 60000);
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
 function showResult(html) {
   const result = document.getElementById("result");
   result.innerHTML = html;
   result.style.display = "block";
 }
-``
