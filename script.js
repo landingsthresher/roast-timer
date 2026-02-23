@@ -1,127 +1,136 @@
+// script.js
 document.getElementById("calcBtn").addEventListener("click", () => {
-    const weight = parseFloat(document.getElementById("weight").value); // in lb
-    const state = document.getElementById("state").value;               // "thawed" | "partial" | "frozen"
-    const ovenTemp = parseFloat(document.getElementById("ovenTemp").value); // main phase temp (°F)
-    const targetTime = document.getElementById("targetTime").value;     // "HH:MM" 24-hour or 12-hour? (assumes "HH:MM" local)
+  const weight = parseFloat(document.getElementById("weight").value);
+  const state  = document.getElementById("state").value;
+  const targetTime = document.getElementById("targetTime").value; // "HH:MM" (local)
 
-    if (!weight || !ovenTemp || !targetTime) {
-        showResult("Please fill out all fields.");
-        return;
-    }
+  if (!weight || !targetTime) {
+    showResult("Please fill out weight and target time.");
+    return;
+  }
 
-    // ---------- Tunable model parameters ----------
-    const REF_TEMP_F = 325;
-    const BASELINE_MIN_PER_LB = 70; // your original baseline @ 325°F, thawed
-    const ALPHA = 1.3;              // temp–time exponent (low-temp takes disproportionately longer)
+  // --- Model parameters (tunable) ---
+  const REF_TEMP_F = 325;
+  const BASELINE_MIN_PER_LB = 70;   // baseline @ 325°F, thawed
+  const ALPHA = 1.3;                // super-linear time growth as oven temp drops
+  const HOLD_TEMP_F = 180;          // end-of-cook gentle hold
+  const HOLD_MIN = 60;              // 60-minute hold
+  const LO_TEMP_BOUND = 200;        // search lower bound
+  const HI_TEMP_BOUND = 500;        // search upper bound
 
-    // Two-stage plan mirroring your success:
-    const HOLD_TEMP_F = 180;
-    const HOLD_MIN = 60;            // 1 hour end-of-cook gentle hold
+  const STATE_MULT = { thawed: 1.00, partial: 1.25, frozen: 1.50 };
 
-    // State multipliers (per USDA/extension guidance: frozen ≈ +50%, partial ≈ +20–25%)
-    // (Used as a starting point for timing; always verify with a thermometer.)
-    const STATE_MULT = {
-        thawed: 1.0,
-        partial: 1.25,
-        frozen: 1.50
-    };
+  // Collagen/low-temp time bonus at ≤ 250°F
+  const lowTempBonus = (tF) => (tF <= 250 ? 1.15 : 1.0);
 
-    // Collagen/low-temp bonus: add time if cooking ≤ 250°F
-    const lowTempBonus = ovenTemp <= 250 ? 1.15 : 1.0;
+  function minutesPhase1AtTemp(tF, wt, st) {
+    const stateMult = STATE_MULT[st] ?? 1.0;
+    // phase-1 (main cook) only
+    return (
+      wt *
+      BASELINE_MIN_PER_LB *
+      Math.pow(REF_TEMP_F / tF, ALPHA) *
+      lowTempBonus(tF) *
+      stateMult
+    );
+  }
 
-    // --- Phase 1 time (main cook at ovenTemp) ---
-    // time_per_lb_325 = 70 min/lb (baseline)
-    // temp adjustment: (REF/ovenTemp)^ALPHA (super-linear as oven drops)
-    // add low-temp collagen factor and frozen/partial multiplier
-    const stateMult = STATE_MULT[state] ?? 1.0;
-    const minutesPhase1 =
-        weight *
-        BASELINE_MIN_PER_LB *
-        Math.pow(REF_TEMP_F / ovenTemp, ALPHA) *
-        lowTempBonus *
-        stateMult;
+  function totalMinutesAtTemp(tF, wt, st) {
+    return minutesPhase1AtTemp(tF, wt, st) + HOLD_MIN;
+  }
 
-    // --- Total time adds the 180°F hold (1 hour) ---
-    const totalMinutes = Math.round(minutesPhase1 + HOLD_MIN);
+  // Parse target into today's date at given time
+  const now = new Date();
+  const [tH, tM] = targetTime.split(":").map(Number);
+  const target = new Date();
+  target.setHours(tH, tM, 0, 0);
 
-    // --- Compute required start time ---
-    const [targetHour, targetMin] = targetTime.split(":").map(Number);
-    const targetDate = new Date();
-    targetDate.setHours(targetHour, targetMin, 0, 0);
+  if (target <= now) {
+    showResult("Target time must be in the future.");
+    return;
+  }
 
-    const startDate = new Date(targetDate.getTime() - totalMinutes * 60000);
-    const startTimeStr = format12Hour(startDate);
+  const availableMin = Math.round((target - now) / 60000);
+  if (availableMin <= HOLD_MIN + 5) {
+    showResult(
+      `Not enough time: you need at least ${HOLD_MIN + 5} minutes from now to include the 60‑minute hold.`
+    );
+    return;
+  }
 
-    // --- Lateness / catch-up suggestion (solve under power-law model) ---
-    const now = new Date();
-    let status = "";
-    let scheduleHtml = "";
+  // Find the lowest oven temp (200..500°F) that fits available time
+  const needPhase1 = availableMin - HOLD_MIN;
 
-    // Human-friendly breakdown
-    scheduleHtml += `<p><strong>Plan:</strong></p>`;
-    scheduleHtml += `<ul>`;
-    scheduleHtml += `<li>Heat oven to <strong>${Math.round(ovenTemp)}°F</strong> and start main cook at <strong>${format12Hour(startDate)}</strong>.</li>`;
-    scheduleHtml += `<li>About <strong>${formatDuration(Math.round(minutesPhase1))}</strong> at ${Math.round(ovenTemp)}°F, then reduce to <strong>${HOLD_TEMP_F}°F</strong> for the final <strong>${HOLD_MIN} min</strong>.</li>`;
-    scheduleHtml += `<li>Aim to verify internal temp with a probe 30–60 min before the 180°F drop; adjust if needed.</li>`;
-    scheduleHtml += `</ul>`;
-
-    if (startDate < now) {
-        const diffMin = Math.round((now - startDate) / 60000);
-
-        // Only “speed up” the Phase 1 block; HOLD_MIN stays constant.
-        const phase1Now = Math.max(10, Math.round(minutesPhase1)); // guard
-        const desiredPhase1 = Math.max(phase1Now - diffMin, 10);
-
-        // From: minutes ∝ (REF/Temp)^ALPHA
-        // desiredPhase1/phase1Now = (ovenTemp / Tcatch)^ALPHA  =>  Tcatch = ovenTemp * (phase1Now/desiredPhase1)^(1/ALPHA)
-        const tempRatio = Math.pow(phase1Now / desiredPhase1, 1 / ALPHA);
-        let catchUpTemp = Math.round(ovenTemp * tempRatio);
-
-        // practical bounds
-        catchUpTemp = Math.max(Math.min(catchUpTemp, 500), Math.max(ovenTemp, 200));
-
-        status = `
-            <p><strong>You are behind by ${diffMin} minutes.</strong></p>
-            <p>Suggested oven temperature (for the main phase) to catch up: <strong>${catchUpTemp}°F</strong>, then reduce to ${HOLD_TEMP_F}°F for the last ${HOLD_MIN} min.</p>
-        `;
-    } else {
-        status = `<p>You are on schedule.</p>`;
-    }
-
-    // Safety reminder (informational)
-    const safety = `
-        <p style="margin-top:0.6rem">
-        <em>Reminder:</em> Use a thermometer and finish at safe internal temps (e.g., whole beef/pork roasts 145°F + 3‑min rest; poultry 165°F). Carryover rise is smaller with low‑temp roasting, so don't rely on a big jump during the hold. 
-        </p>
-    `;
-
+  // If even at 500°F it's still too long, tell the user
+  const minTimeAtMaxHeat = minutesPhase1AtTemp(HI_TEMP_BOUND, weight, state);
+  if (minTimeAtMaxHeat > needPhase1) {
+    const soonestFinishMin = Math.round(minTimeAtMaxHeat + HOLD_MIN);
+    const soonestDate = new Date(now.getTime() + soonestFinishMin * 60000);
     showResult(`
-        <p>Total cooking time: <strong>${formatDuration(totalMinutes)}</strong></p>
-        <p>Required start time: <strong>${startTimeStr}</strong></p>
-        ${scheduleHtml}
-        ${status}
-        ${safety}
+      <p><strong>Even at 500°F you won't make the target.</strong></p>
+      <p>Soonest finish (with 60‑min hold): <strong>${format12Hour(soonestDate)}</strong> (${formatDuration(soonestFinishMin)} from now).</p>
+      <p>Options: start earlier, shorten the hold, or choose a later target time.</p>
     `);
+    return;
+  }
+
+  // Binary search for temp where total time <= availableMin
+  let lo = LO_TEMP_BOUND, hi = HI_TEMP_BOUND, best = HI_TEMP_BOUND;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    const tot = totalMinutesAtTemp(mid, weight, state);
+    if (tot <= availableMin) {
+      best = mid;      // mid works; try lower temp (gentler cook)
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+
+  const recTemp = Math.round(best);
+  const totalMin = Math.round(totalMinutesAtTemp(recTemp, weight, state));
+  const phase1Min = totalMin - HOLD_MIN;
+
+  const dropToHoldAt = new Date(target.getTime() - HOLD_MIN * 60000);
+
+  // Friendly plan
+  let plan = `<p><strong>Recommended oven temperature:</strong> <span style="font-size:1.1em">${recTemp}°F</span></p>`;
+  plan += `<p><strong>Total time:</strong> ${formatDuration(totalMin)} (main phase ${formatDuration(phase1Min)} + ${HOLD_MIN}‑min hold)</p>`;
+  plan += `<p><strong>Schedule:</strong></p><ul>`;
+  plan += `<li>Start <strong>now</strong> at <strong>${recTemp}°F</strong>.</li>`;
+  plan += `<li>Cook for <strong>${formatDuration(phase1Min)}</strong>.</li>`;
+  plan += `<li>At <strong>${format12Hour(dropToHoldAt)}</strong>, reduce to <strong>${HOLD_TEMP_F}°F</strong> and hold for <strong>${HOLD_MIN} min</strong>.</li>`;
+  plan += `<li>Ready at <strong>${format12Hour(target)}</strong>.</li>`;
+  plan += `</ul>`;
+
+  // Safety + probe reminder (carryover is smaller with low-temp)
+  const safety = `
+    <p><em>Tip:</em> Use a thermometer to confirm safe/internal doneness
+    (e.g., whole beef/pork roasts <strong>145°F + 3‑min rest</strong>; poultry <strong>165°F</strong>).
+    Carryover rise is smaller with gentle roasting, so verify temps before the hold ends.</p>
+  `;
+
+  showResult(plan + safety);
 });
 
+// ---- Utilities ----
 function format12Hour(date) {
-    let hours = date.getHours();
-    const minutes = date.getMinutes().toString().padStart(2, "0");
-    const ampm = hours >= 12 ? "PM" : "AM";
-    hours = hours % 12 || 12;
-    return `${hours}:${minutes} ${ampm}`;
+  let hours = date.getHours();
+  const minutes = date.getMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12 || 12;
+  return `${hours}:${minutes} ${ampm}`;
 }
-
 function formatDuration(mins) {
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    if (h === 0) return `${m} minutes`;
-    if (m === 0) return `${h} hour${h !== 1 ? "s" : ""}`;
-    return `${h} hour${h !== 1 ? "s" : ""} ${m} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h === 0) return `${m} minutes`;
+  if (m === 0) return `${h} hour${h !== 1 ? "s" : ""}`;
+  return `${h} hour${h !== 1 ? "s" : ""} ${m} min`;
 }
-
 function showResult(html) {
-    const result = document.getElementById("result");
-    result.innerHTML = html;
-    result.style.display = "block";
+  const result = document.getElementById("result");
+  result.innerHTML = html;
+  result.style.display = "block";
 }
+``
