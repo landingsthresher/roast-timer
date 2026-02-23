@@ -1,13 +1,9 @@
-// Roast Timer – dual outputs with "too early" and day-boundary handling
-// 1) Ideal Plan: preferred low-temp (default 240°F) + 60 min @ 180°F; shows ideal start time.
-// 2) Start-Now Plan: solve for oven temp to meet target if beginning now.
-//    If the target is far enough in the future that you'd finish early even at 200°F,
-//    we suppress the start-now schedule and recommend the Ideal Plan instead.
+// Roast Timer — Dual Output (Ideal Plan + Start-Now Plan) with day-boundary + "too early" handling
 
 document.getElementById("calcBtn").addEventListener("click", () => {
   const weight = parseFloat(document.getElementById("weight").value);
-  const state  = document.getElementById("state").value;
-  const targetTimeStr = document.getElementById("targetTime").value; // "HH:MM"
+  const state = document.getElementById("state").value;
+  const targetTimeStr = document.getElementById("targetTime").value; // "HH:MM" (24-hour from <input type="time">)
 
   if (!weight || !targetTimeStr) {
     showResult("Please enter weight and target time.");
@@ -16,28 +12,29 @@ document.getElementById("calcBtn").addEventListener("click", () => {
 
   // -------------------- Model parameters (tunable) --------------------
   const REF_TEMP_F = 325;
-  const BASELINE_MIN_PER_LB = 70; // baseline at 325°F, thawed
-  const ALPHA = 1.3;              // non-linear slowdown as oven temp drops
+  const BASELINE_MIN_PER_LB = 70; // baseline @325°F, thawed
+  const ALPHA = 1.3;              // non-linear slowdown at low temps
   const HOLD_TEMP_F = 180;        // finishing/serving hold
   const HOLD_MIN = 60;            // 60-minute hold
 
-  // Ideal Plan main temp
+  // Ideal Plan main temp (your proven low & slow)
   const IDEAL_MAIN_TEMP_F = 240;
 
-  // Bounds for solver (start-now)
-  const MIN_OVEN_F = 200;
-  const MAX_OVEN_F = 500;
+  // Bounds for solver (Start-Now)
+  const MIN_OVEN_F = 200; // slowest realistic cook we allow
+  const MAX_OVEN_F = 500; // fastest realistic cook we allow
 
-  // "Too-early" tolerance: if we could finish ≥ this much earlier than the target, don't start now.
+  // "Too-early" buffer: if target is later than the slowest cook by ≥ this many minutes,
+  // we suppress Start-Now and tell the user to use Ideal Plan.
   const TOO_EARLY_BUFFER_MIN = 30;
 
-  // State multipliers (planning heuristics; always verify with a thermometer)
+  // State multipliers (planning heuristics; confirm with a thermometer in real life)
   const STATE_MULT = { thawed: 1.00, partial: 1.25, frozen: 1.50 };
 
   // Collagen/low-temp time bonus at ≤ 250°F
   const lowTempBonus = (tF) => (tF <= 250 ? 1.15 : 1.0);
 
-  // -------------------- Timing functions --------------------
+  // -------------------- Timing helpers --------------------
   function minutesPhase1AtTemp(tF, wt, st) {
     const stateMult = STATE_MULT[st] ?? 1.0;
     return (
@@ -62,14 +59,14 @@ document.getElementById("calcBtn").addEventListener("click", () => {
     return t;
   }
 
-  // Find lowest oven temp (200..500°F) that completes within availableMin
+  // Binary search for the lowest oven temp that completes within the available window
   function solveOvenTempForWindow(availableMin, wt, st) {
     let lo = MIN_OVEN_F, hi = MAX_OVEN_F, best = null;
     for (let i = 0; i < 40; i++) {
       const mid = (lo + hi) / 2;
       const tot = totalMinutesAtTemp(mid, wt, st);
       if (tot <= availableMin) {
-        best = mid;      // feasible; try gentler (lower) temp
+        best = mid; // feasible; try gentler (lower) temp
         hi = mid;
       } else {
         lo = mid;
@@ -78,27 +75,30 @@ document.getElementById("calcBtn").addEventListener("click", () => {
     return best;
   }
 
-  // -------------------- Date-aware formatting --------------------
+  // -------------------- Date/time formatting --------------------
   const WEEKDAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
   function sameDay(a, b) {
     return a.getFullYear() === b.getFullYear() &&
            a.getMonth() === b.getMonth() &&
            a.getDate() === b.getDate();
   }
-  function labelFor(date) {
+  function dateLabel(date) {
     const now = new Date();
-    const tomorrow = new Date(now); tomorrow.setDate(now.getDate() + 1);
-    if (sameDay(date, now)) return "";              // today
-    if (sameDay(date, tomorrow)) return "Tomorrow"; // tomorrow
-    return WEEKDAYS[date.getDay()];                 // weekday label
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    if (sameDay(date, now)) return "Today";
+    if (sameDay(date, tomorrow)) return "Tomorrow";
+    return `${WEEKDAYS[date.getDay()]} ${date.getMonth()+1}/${date.getDate()}`;
   }
-  function format12Hour(date, includeDay = true) {
+  function formatTime12h(date) {
     let h = date.getHours();
     const m = date.getMinutes().toString().padStart(2, "0");
     const ampm = h >= 12 ? "PM" : "AM";
     h = h % 12 || 12;
-    const dayLbl = includeDay ? labelFor(date) : "";
-    return dayLbl ? `${dayLbl} ${h}:${m} ${ampm}` : `${h}:${m} ${ampm}`;
+    return `${h}:${m} ${ampm}`;
+  }
+  function formatDT(date) {
+    return `${dateLabel(date)} ${formatTime12h(date)}`;
   }
   function formatDuration(mins) {
     const h = Math.floor(mins / 60);
@@ -119,67 +119,70 @@ document.getElementById("calcBtn").addEventListener("click", () => {
   // -------------------- Compute both plans --------------------
   const now = new Date();
   const target = nextOccurrenceOf(targetTimeStr);
+  const availableMin = Math.max(0, Math.round((target - now) / 60000));
 
-  // --- 1) IDEAL PLAN ---
+  // --- Ideal Plan (fixed temp + hold) ---
   const idealPhase1Min = Math.round(minutesPhase1AtTemp(IDEAL_MAIN_TEMP_F, weight, state));
   const idealTotalMin = idealPhase1Min + HOLD_MIN;
   const idealStart = new Date(target.getTime() - idealTotalMin * 60000);
-
-  const idealStatus =
-    idealStart < now
-      ? ` (this start time is <strong>${formatDelta(now - idealStart)}</strong> late for today)`
-      : "";
+  const idealLateNote = idealStart < now
+    ? ` (this start time is <strong>${formatDelta(now - idealStart)}</strong> late for today)`
+    : "";
 
   const idealHtml = `
     <p><strong>Ideal Plan</strong> (main phase <strong>${IDEAL_MAIN_TEMP_F}°F</strong> + ${HOLD_MIN}‑min hold)</p>
     <ul>
-      <li>Ideal start: <strong>${format12Hour(idealStart)}</strong>${idealStatus}</li>
+      <li>Ideal start: <strong>${formatDT(idealStart)}</strong>${idealLateNote}</li>
       <li>Main phase: <strong>${formatDuration(idealPhase1Min)}</strong> at <strong>${IDEAL_MAIN_TEMP_F}°F</strong></li>
       <li>Then reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
-      <li>Ready at <strong>${format12Hour(target)}</strong></li>
+      <li>Ready at <strong>${formatDT(target)}</strong></li>
     </ul>
   `;
 
-  // --- 2) START-NOW PLAN ---
-  const availableMin = Math.max(0, Math.round((target - now) / 60000));
-
-  // Earliest you could possibly finish if you start immediately and use the *slowest* main phase we allow (200°F)
-  const minTotalAt200 = Math.round(totalMinutesAtTemp(MIN_OVEN_F, weight, state));
-  const earliestFinishIfStartNow = new Date(now.getTime() + minTotalAt200 * 60000);
-  const finishTooEarlyByMin = availableMin - minTotalAt200; // positive means you'd finish early
+  // --- Start-Now Plan gating ---
+  const slowestTotalMin = Math.round(totalMinutesAtTemp(MIN_OVEN_F, weight, state)); // 200°F = longest cook
+  const fastestTotalMin = Math.round(totalMinutesAtTemp(MAX_OVEN_F, weight, state)); // 500°F = shortest cook
 
   let startNowHtml = "";
 
-  if (availableMin <= HOLD_MIN + 5) {
-    // Not enough time left to include the 60-min hold
-    startNowHtml += `
-      <p><strong>Start‑Now Plan:</strong> Not enough time left to include the 60‑minute hold.</p>
-      <p>You need at least <strong>${HOLD_MIN + 5} minutes</strong> from now. Consider a later target time.</p>
+  if (availableMin < fastestTotalMin) {
+    // Not enough time, even at 500°F
+    const soonestFinish = new Date(now.getTime() + fastestTotalMin * 60000);
+    const dropAtSoonest = new Date(soonestFinish.getTime() - HOLD_MIN * 60000);
+    startNowHtml = `
+      <p><strong>Start‑Now Plan:</strong> Not achievable by your target, even at <strong>${MAX_OVEN_F}°F</strong>.</p>
+      <ul>
+        <li>Soonest drop to <strong>${HOLD_TEMP_F}°F</strong>: <strong>${formatDT(dropAtSoonest)}</strong></li>
+        <li>Soonest ready (incl. ${HOLD_MIN}-min hold): <strong>${formatDT(soonestFinish)}</strong> (${formatDuration(fastestTotalMin)} from now)</li>
+      </ul>
+      <p>Options: start earlier, shorten the hold, or choose a later target time.</p>
     `;
-  } else if (finishTooEarlyByMin >= TOO_EARLY_BUFFER_MIN) {
-    // Too early to start now — even at 200°F + 60-min hold you'd finish early
-    startNowHtml += `
+  } else if (availableMin > slowestTotalMin + TOO_EARLY_BUFFER_MIN) {
+    // Target is too far away to start now without finishing early at even 200°F
+    const earliestFinishIfNow = new Date(now.getTime() + slowestTotalMin * 60000);
+    const finishEarlyBy = availableMin - slowestTotalMin;
+    startNowHtml = `
       <p><strong>Start‑Now Plan:</strong> It’s too early to start now.</p>
       <ul>
-        <li>Earliest feasible finish <em>if you started immediately</em>: <strong>${format12Hour(earliestFinishIfStartNow)}</strong> (${formatDuration(minTotalAt200)} from now)</li>
-        <li>This is about <strong>${formatDuration(finishTooEarlyByMin)}</strong> earlier than your target.</li>
+        <li>Earliest feasible finish <em>if you started immediately</em>: <strong>${formatDT(earliestFinishIfNow)}</strong> (${formatDuration(slowestTotalMin)} from now)</li>
+        <li>That would be about <strong>${formatDuration(finishEarlyBy)}</strong> earlier than your target.</li>
       </ul>
-      <p>Please follow the <strong>Ideal Plan</strong> instead (start at <strong>${format12Hour(idealStart)}</strong>).</p>
+      <p>Please follow the <strong>Ideal Plan</strong> instead (start at <strong>${formatDT(idealStart)}</strong>).</p>
     `;
   } else {
-    // We have a sensible "start now" window — solve for the gentlest temp that fits
+    // Start-now makes sense: solve for temp in [200..500] that meets the window
     const bestTemp = Math.round(solveOvenTempForWindow(availableMin, weight, state));
-    const startNowTotalMin = Math.round(totalMinutesAtTemp(bestTemp, weight, state));
-    const startNowPhase1Min = startNowTotalMin - HOLD_MIN;
-    const dropToHoldAt = new Date(target.getTime() - HOLD_MIN * 60000);
+    const totalMin = Math.round(totalMinutesAtTemp(bestTemp, weight, state));
+    const phase1Min = totalMin - HOLD_MIN;
+    const dropAt = new Date(target.getTime() - HOLD_MIN * 60000);
 
-    startNowHtml += `
+    startNowHtml = `
       <p><strong>Start‑Now Plan</strong> (begin immediately)</p>
       <ul>
         <li>Main oven temp: <strong>${bestTemp}°F</strong></li>
-        <li>Main phase: <strong>${formatDuration(startNowPhase1Min)}</strong> (from now)</li>
-        <li>At <strong>${format12Hour(dropToHoldAt)}</strong>, reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
-        <li>Ready at <strong>${format12Hour(target)}</strong></li>
+        <li>Main phase: <strong>${formatDuration(phase1Min)}</strong> (from now)</li>
+        <li>At <strong>${formatDT(dropAt)}</strong>, reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
+        <li>Ready at <strong>${formatDT(target)}</strong></li>
       </ul>
     `;
   }
@@ -193,7 +196,7 @@ document.getElementById("calcBtn").addEventListener("click", () => {
   showResult(idealHtml + startNowHtml + safety);
 });
 
-// -------------------- DOM helpers --------------------
+// -------------------- DOM helper --------------------
 function showResult(html) {
   const result = document.getElementById("result");
   result.innerHTML = html;
