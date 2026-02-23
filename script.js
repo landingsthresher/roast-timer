@@ -1,10 +1,10 @@
 // Roast Timer — Dual Output (Ideal Plan + Start-Now Plan)
-// - "Too early" path now just points to Ideal Plan (no "earliest feasible finish" text).
-// - Default state set to 'frozen' on page load.
-// - Day-boundary handling and explicit date labels to avoid AM/PM ambiguity.
+// Emphasizes the exact clock-time to drop to 180°F in BOTH plans.
+// Defaults "Starting State" to Frozen on load.
+// Handles day-boundaries and "too early to start now" gating.
 
 document.addEventListener("DOMContentLoaded", () => {
-  // Default to 'frozen' unless user changes it
+  // Default to 'frozen' unless the user changes it
   const stateEl = document.getElementById("state");
   if (stateEl) stateEl.value = "frozen";
 });
@@ -135,16 +135,18 @@ document.getElementById("calcBtn").addEventListener("click", () => {
   const idealPhase1Min = Math.round(minutesPhase1AtTemp(IDEAL_MAIN_TEMP_F, weight, state));
   const idealTotalMin = idealPhase1Min + HOLD_MIN;
   const idealStart = new Date(target.getTime() - idealTotalMin * 60000);
+  const idealDropAt = new Date(target.getTime() - HOLD_MIN * 60000); // <— emphasize this
   const idealLateNote = idealStart < now
     ? ` (this start time is <strong>${formatDelta(now - idealStart)}</strong> late for today)`
     : "";
 
   const idealHtml = `
     <p><strong>Ideal Plan</strong> (main phase <strong>${IDEAL_MAIN_TEMP_F}°F</strong> + ${HOLD_MIN}‑min hold)</p>
+    <p style="font-size:1.1em;margin:0.3rem 0;"><strong>⬇️ DROP TO 180°F AT: ${formatDT(idealDropAt)}</strong></p>
     <ul>
       <li>Ideal start: <strong>${formatDT(idealStart)}</strong>${idealLateNote}</li>
       <li>Main phase: <strong>${formatDuration(idealPhase1Min)}</strong> at <strong>${IDEAL_MAIN_TEMP_F}°F</strong></li>
-      <li>Then reduce to <strong>${HOLD_MIN} min</strong> at <strong>${HOLD_TEMP_F}°F</strong></li>
+      <li>Then reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
       <li>Ready at <strong>${formatDT(target)}</strong></li>
     </ul>
   `;
@@ -161,8 +163,8 @@ document.getElementById("calcBtn").addEventListener("click", () => {
     const dropAtSoonest = new Date(soonestFinish.getTime() - HOLD_MIN * 60000);
     startNowHtml = `
       <p><strong>Start‑Now Plan:</strong> Not achievable by your target, even at <strong>${MAX_OVEN_F}°F</strong>.</p>
+      <p style="font-size:1.1em;margin:0.3rem 0;"><strong>⬇️ DROP TO 180°F AT: ${formatDT(dropAtSoonest)}</strong></p>
       <ul>
-        <li>Drop to <strong>${HOLD_TEMP_F}°F</strong>: <strong>${formatDT(dropAtSoonest)}</strong></li>
         <li>Soonest ready (incl. ${HOLD_MIN}-min hold): <strong>${formatDT(soonestFinish)}</strong> (${formatDuration(fastestTotalMin)} from now)</li>
       </ul>
       <p>Options: start earlier, shorten the hold, or choose a later target time.</p>
@@ -181,10 +183,11 @@ document.getElementById("calcBtn").addEventListener("click", () => {
 
     startNowHtml = `
       <p><strong>Start‑Now Plan</strong> (begin immediately)</p>
+      <p style="font-size:1.1em;margin:0.3rem 0;"><strong>⬇️ DROP TO 180°F AT: ${formatDT(dropAt)}</strong></p>
       <ul>
         <li>Main oven temp: <strong>${bestTemp}°F</strong></li>
         <li>Main phase: <strong>${formatDuration(phase1Min)}</strong> (from now)</li>
-        <li>At <strong>${formatDT(dropAt)}</strong>, reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
+        <li>Then hold at <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
         <li>Ready at <strong>${formatDT(target)}</strong></li>
       </ul>
     `;
