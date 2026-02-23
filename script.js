@@ -1,9 +1,18 @@
-// Roast Timer — Dual Output (Ideal Plan + Start-Now Plan) with day-boundary + "too early" handling
+// Roast Timer — Dual Output (Ideal Plan + Start-Now Plan)
+// - "Too early" path now just points to Ideal Plan (no "earliest feasible finish" text).
+// - Default state set to 'frozen' on page load.
+// - Day-boundary handling and explicit date labels to avoid AM/PM ambiguity.
+
+document.addEventListener("DOMContentLoaded", () => {
+  // Default to 'frozen' unless user changes it
+  const stateEl = document.getElementById("state");
+  if (stateEl) stateEl.value = "frozen";
+});
 
 document.getElementById("calcBtn").addEventListener("click", () => {
   const weight = parseFloat(document.getElementById("weight").value);
-  const state = document.getElementById("state").value;
-  const targetTimeStr = document.getElementById("targetTime").value; // "HH:MM" (24-hour from <input type="time">)
+  const stateInput = document.getElementById("state").value || "frozen";
+  const targetTimeStr = document.getElementById("targetTime").value; // "HH:MM" from <input type="time">
 
   if (!weight || !targetTimeStr) {
     showResult("Please enter weight and target time.");
@@ -21,14 +30,13 @@ document.getElementById("calcBtn").addEventListener("click", () => {
   const IDEAL_MAIN_TEMP_F = 240;
 
   // Bounds for solver (Start-Now)
-  const MIN_OVEN_F = 200; // slowest realistic cook we allow
-  const MAX_OVEN_F = 500; // fastest realistic cook we allow
+  const MIN_OVEN_F = 200; // slowest allowed
+  const MAX_OVEN_F = 500; // fastest allowed
 
-  // "Too-early" buffer: if target is later than the slowest cook by ≥ this many minutes,
-  // we suppress Start-Now and tell the user to use Ideal Plan.
+  // "Too-early" buffer: if target is later than the slowest cook by ≥ this, skip Start-Now
   const TOO_EARLY_BUFFER_MIN = 30;
 
-  // State multipliers (planning heuristics; confirm with a thermometer in real life)
+  // State multipliers (planning heuristics; always verify with a thermometer)
   const STATE_MULT = { thawed: 1.00, partial: 1.25, frozen: 1.50 };
 
   // Collagen/low-temp time bonus at ≤ 250°F
@@ -121,6 +129,8 @@ document.getElementById("calcBtn").addEventListener("click", () => {
   const target = nextOccurrenceOf(targetTimeStr);
   const availableMin = Math.max(0, Math.round((target - now) / 60000));
 
+  const state = stateInput; // already defaulted to 'frozen' if empty
+
   // --- Ideal Plan (fixed temp + hold) ---
   const idealPhase1Min = Math.round(minutesPhase1AtTemp(IDEAL_MAIN_TEMP_F, weight, state));
   const idealTotalMin = idealPhase1Min + HOLD_MIN;
@@ -134,14 +144,14 @@ document.getElementById("calcBtn").addEventListener("click", () => {
     <ul>
       <li>Ideal start: <strong>${formatDT(idealStart)}</strong>${idealLateNote}</li>
       <li>Main phase: <strong>${formatDuration(idealPhase1Min)}</strong> at <strong>${IDEAL_MAIN_TEMP_F}°F</strong></li>
-      <li>Then reduce to <strong>${HOLD_TEMP_F}°F</strong> for <strong>${HOLD_MIN} min</strong></li>
+      <li>Then reduce to <strong>${HOLD_MIN} min</strong> at <strong>${HOLD_TEMP_F}°F</strong></li>
       <li>Ready at <strong>${formatDT(target)}</strong></li>
     </ul>
   `;
 
-  // --- Start-Now Plan gating ---
-  const slowestTotalMin = Math.round(totalMinutesAtTemp(MIN_OVEN_F, weight, state)); // 200°F = longest cook
-  const fastestTotalMin = Math.round(totalMinutesAtTemp(MAX_OVEN_F, weight, state)); // 500°F = shortest cook
+  // --- Start-Now gating ---
+  const slowestTotalMin = Math.round(totalMinutesAtTemp(MIN_OVEN_F, weight, state)); // at 200°F
+  const fastestTotalMin = Math.round(totalMinutesAtTemp(MAX_OVEN_F, weight, state)); // at 500°F
 
   let startNowHtml = "";
 
@@ -152,22 +162,15 @@ document.getElementById("calcBtn").addEventListener("click", () => {
     startNowHtml = `
       <p><strong>Start‑Now Plan:</strong> Not achievable by your target, even at <strong>${MAX_OVEN_F}°F</strong>.</p>
       <ul>
-        <li>Soonest drop to <strong>${HOLD_TEMP_F}°F</strong>: <strong>${formatDT(dropAtSoonest)}</strong></li>
+        <li>Drop to <strong>${HOLD_TEMP_F}°F</strong>: <strong>${formatDT(dropAtSoonest)}</strong></li>
         <li>Soonest ready (incl. ${HOLD_MIN}-min hold): <strong>${formatDT(soonestFinish)}</strong> (${formatDuration(fastestTotalMin)} from now)</li>
       </ul>
       <p>Options: start earlier, shorten the hold, or choose a later target time.</p>
     `;
   } else if (availableMin > slowestTotalMin + TOO_EARLY_BUFFER_MIN) {
-    // Target is too far away to start now without finishing early at even 200°F
-    const earliestFinishIfNow = new Date(now.getTime() + slowestTotalMin * 60000);
-    const finishEarlyBy = availableMin - slowestTotalMin;
+    // Too far away — don't suggest a start-now cook; just point to the Ideal Plan.
     startNowHtml = `
-      <p><strong>Start‑Now Plan:</strong> It’s too early to start now.</p>
-      <ul>
-        <li>Earliest feasible finish <em>if you started immediately</em>: <strong>${formatDT(earliestFinishIfNow)}</strong> (${formatDuration(slowestTotalMin)} from now)</li>
-        <li>That would be about <strong>${formatDuration(finishEarlyBy)}</strong> earlier than your target.</li>
-      </ul>
-      <p>Please follow the <strong>Ideal Plan</strong> instead (start at <strong>${formatDT(idealStart)}</strong>).</p>
+      <p><strong>Start‑Now Plan:</strong> It’s too early to start. Please follow the <strong>Ideal Plan</strong> (start at <strong>${formatDT(idealStart)}</strong>).</p>
     `;
   } else {
     // Start-now makes sense: solve for temp in [200..500] that meets the window
